@@ -24,15 +24,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure (Visual Studio 2022, x64)
+      - name: Set up MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure (Ninja + MSVC, x64, Release)
         shell: pwsh
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DVOXFORGE_BUILD_PLUGIN=ON -DVOXFORGE_BUILD_TESTS=ON
-        # The generator/image pairing is expected to work on windows-latest; if the runner image
-        # no longer ships VS 2022, this step fails visibly and the generator name must be updated.
+        run: |
+          cl 2>&1 | Select-Object -First 1
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVOXFORGE_BUILD_PLUGIN=ON -DVOXFORGE_BUILD_TESTS=ON
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed with exit code $LASTEXITCODE" }
 
       - name: Build (Release)
         shell: pwsh
-        run: cmake --build build --config Release --parallel
+        run: |
+          cmake --build build --config Release
+          if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
 
       - name: Run tests
         shell: pwsh
