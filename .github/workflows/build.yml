@@ -1,0 +1,75 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  dsp-linux:
+    name: DSP tests (Linux, ASan+UBSan)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" -DVOXFORGE_BUILD_PLUGIN=OFF
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  windows-vst3:
+    name: Windows x64 VST3 (MSVC)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (Visual Studio 2022, x64)
+        shell: pwsh
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DVOXFORGE_BUILD_PLUGIN=ON -DVOXFORGE_BUILD_TESTS=ON
+        # The generator/image pairing is expected to work on windows-latest; if the runner image
+        # no longer ships VS 2022, this step fails visibly and the generator name must be updated.
+
+      - name: Build (Release)
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force test_logs | Out-Null
+          ctest --test-dir build -C Release --output-on-failure 2>&1 | Tee-Object -FilePath test_logs/ctest_windows.log
+          if ($LASTEXITCODE -ne 0) { throw "ctest failed with exit code $LASTEXITCODE" }
+
+      - name: Verify VST3 bundle and binary architecture
+        shell: pwsh
+        run: |
+          $bundle = Get-ChildItem -Path build -Recurse -Directory -Filter *.vst3 | Select-Object -First 1
+          if (-not $bundle) { throw "No .vst3 bundle found under build/" }
+          Write-Host "Bundle: $($bundle.FullName)"
+          $dll = Get-ChildItem -Path $bundle.FullName -Recurse -File -Filter *.vst3 | Select-Object -First 1
+          if (-not $dll) { throw "Bundle contains no .vst3 binary" }
+          Write-Host "Binary: $($dll.FullName) ($($dll.Length) bytes)"
+          $fs = [System.IO.File]::OpenRead($dll.FullName)
+          try {
+            $br = New-Object System.IO.BinaryReader($fs)
+            $fs.Seek(0x3C, 'Begin') | Out-Null
+            $peOffset = $br.ReadInt32()
+            $fs.Seek($peOffset, 'Begin') | Out-Null
+            $sig = $br.ReadUInt32()
+            if ($sig -ne 0x00004550) { throw "Not a PE file" }
+            $machine = $br.ReadUInt16()
+          } finally { $fs.Dispose() }
+          Write-Host ("PE machine field: 0x{0:X4}" -f $machine)
+          if ($machine -ne 0x8664) { throw "Binary is not x86-64 (machine=0x$('{0:X4}' -f $machine))" }
+          "bundle=$($bundle.FullName)`nbinary=$($dll.FullName)`nsize=$($dll.Length)`nmachine=0x{0:X4} (x86-64)" -f $machine |
+            Out-File -Encoding utf8 test_logs/vst3_verification.txt
+
+      - name: Upload VST3 and logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoxForge-win-x64-vst3-${{ github.sha }}
+          path: |
+            build/**/*.vst3
+            test_logs/
+          if-no-files-found: error
